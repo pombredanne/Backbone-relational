@@ -4,7 +4,7 @@ Backbone-relational provides one-to-one, one-to-many and many-to-one relations b
 * Bidirectional relations, which notify related models of changes through events.
 * Control how relations are serialized using the `includeInJSON` option.
 * Automatically convert nested objects in a model's attributes into Model instances using the `createModels` option.
-* Retrieve (a set of) related models through the `fetchRelated(key<string>, [options<object>])` method.
+* Lazily retrieve (a set of) related models through the `fetchRelated(key<string>, [options<object>], update<bool>)` method.
 * Determine the type of `HasMany` collections with `collectionType`.
 * Bind new events to a `Backbone.RelationalModel` for:
 	* addition to a `HasMany` relation (bind to `add:<key>`; arguments: `(addedModel, relatedCollection)`),
@@ -14,14 +14,22 @@ Backbone-relational provides one-to-one, one-to-many and many-to-one relations b
 
 ## Contents
 
-* [Installation](#installation)
+* [Getting started](#getting-started)
 * [Backbone.Relation options](#backbone-relation)
 * [Backbone.RelationalModel](#backbone-relationalmodel)
 * [Example](#example)
 * [Known problems and solutions](#q-and-a)
 * [Under the hood](#under-the-hood)
 
-## <a name="installation"/>Installation
+
+## <a name="getting-started"/>Getting started
+
+Resources to get you started with Backbone-relational:
+
+* [A great tutorial by antoviaque](http://antoviaque.org/docs/tutorials/backbone-relational-tutorial/) ([and the accompanying git repository](https://github.com/antoviaque/backbone-relational-tutorial))
+
+
+### <a name="installation"/>Installation
 
 Backbone-relational depends on [backbone](https://github.com/documentcloud/backbone) (and thus on  [underscore](https://github.com/documentcloud/underscore)). Include Backbone-relational right after Backbone and Underscore:
 
@@ -31,7 +39,8 @@ Backbone-relational depends on [backbone](https://github.com/documentcloud/backb
 <script type="text/javascript" src="./js/backbone-relational.js"></script>
 ```
 
-Backbone-relational has been tested with Backbone 0.5.3 (or newer) and Underscore 1.2.1 (or newer).
+Backbone-relational has been tested with Backbone 0.9.2 (or newer) and Underscore 1.3.1 (or newer).
+
 
 ## <a name="backbone-relation"/>Backbone.Relation options
 
@@ -42,16 +51,16 @@ A relation could look like the following:
 ```javascript
 Zoo = Backbone.RelationalModel.extend({
 	relations: [{
-			type: Backbone.HasMany,
-			key: 'animals',
-			relatedModel: 'Animal',
-			collectionType: 'AnimalCollection',
-			reverseRelation: {
-				key: 'livesIn',
-				includeInJSON: 'id'
-				// 'relatedModel' is automatically set to 'Zoo'; the 'relationType' to 'HasOne'.
-			}
-		}]
+		type: Backbone.HasMany,
+		key: 'animals',
+		relatedModel: 'Animal',
+		collectionType: 'AnimalCollection',
+		reverseRelation: {
+			key: 'livesIn',
+			includeInJSON: 'id'
+			// 'relatedModel' is automatically set to 'Zoo'; the 'relationType' to 'HasOne'.
+		}
+	}]
 });
 
 Animal = Backbone.RelationalModel.extend({
@@ -134,8 +143,38 @@ niceCompany.bind( 'add:employees', function( model, coll ) {
 		// Will see a Job with attributes { person: paul, company: niceCompany } being added here
 	});
 
-paul.get('jobs').add( { company: niceCompany } );
+paul.get( 'jobs' ).add( { company: niceCompany } );
 ```
+
+### keySource
+
+Value: a string. References an attribute on the data used to instantiate `relatedModel`.
+
+Used to override `key` when determining what data to use when (de)serializing a relation, since the data backing your relations may use different naming conventions.
+For example, a Rails backend may provide the keys suffixed with `_id` or `_ids`. The behavior for `keySource` corresponds to the following rules:
+
+1. When a relation is instantiated, the contents of the `keySource` are used as it's initial data.
+2. The application uses the regular `key` attribute to interface with the relation and the models in it; the `keySource` is not available as an attribute for the model.
+
+So you may be provided with data containing `animal_ids`, while you want to access this relation as `zoo.get( 'animals' );`.
+
+**NOTE**: for backward compatibility reasons, setting `keySource` will set `keyDestination` as well. 
+This means that when saving `zoo`, the `animals` attribute will be serialized back into the `animal_ids` key.
+
+**WARNING**: when using a `keySource`, you should not use that attribute name for other purposes.
+
+### keyDestination
+
+Value: a string. References an attribute to serialize `relatedModel` into.
+
+Used to override `key` (and `keySource`) when determining what attribute to be written into when serializing a relation, since the server backing your relations may use different naming conventions.
+For example, a Rails backend may expect the keys to be suffixed with `_attributes` for nested attributes.
+
+When calling `toJSON` on a model (either via `Backbone.sync`, or directly), the data in the `key` attribute is transformed and assigned to the `keyDestination`.
+
+So you may want a relation to be serialized into the `animals_attributes` key, while you want to access this relation as `zoo.get( 'animals' );`.
+
+**WARNING**: when using a `keyDestination`, you should not use that attribute name for other purposes.
 
 ### collectionType
 
@@ -150,18 +189,31 @@ of a `url` function that can build a url for the collection (or a subset of mode
 
 Value: a string or a boolean
 
+Used to create a back reference from the `Backbone.Collection` used for a `HasMany` relation to the model on the other side of this relation.
 By default, the relation's `key` attribute will be used to create a reference to the RelationalModel instance from the generated collection.
 If you set `collectionKey` to a string, it will use that string as the reference to the RelationalModel, rather than the relation's `key` attribute.
-If you don't want this behavior at all, just set `collectionKey` to false (or any falsy value) and this reference will not be created.
+If you don't want this behavior at all, set `collectionKey` to false (or any falsy value) and this reference will not be created.
+
+### collectionOptions
+
+Value: an options hash or a function that accepts an instance of a `Backbone.RelationalModel` and returns an option hash
+
+Used to provide options for the initialization of the collection in the "Many"-end of a `HasMany` relation. Can be an options hash or
+a function that should take the instance in the "One"-end of the "HasMany" relation and return an options hash
 
 ### includeInJSON
 
-Value: a boolean, or a string referencing one of the model's attributes. Default: `true`.
+Value: a boolean, a string referencing one of the model's attributes, or an array of strings referencing model attributes. Default: `true`.
 
-Determines how a relation will be serialized following a call to the `toJSON` method. A value of `true` serializes the full set of attributes
-on the related model(s), in which case the relations of this object are serialized as well. Set to `false` to exclude the relation completely.
-You can also choose to include a single attribute from the related model by using a string.
-For example, `'name'`, or `Backbone.Model.prototype.idAttribute` to include ids.
+Determines how the contents of a relation will be serialized following a call to the `toJSON` method. If you specify a:
+
+* Boolean: a value of `true` serializes the full set of attributes on the related model(s).
+  Set to `false` to exclude the relation completely.
+* String: include a single attribute from the related model(s). For example, `'name'`,
+  or `Backbone.Model.prototype.idAttribute` to include ids.
+* String[]: includes the specified attributes from the related model(s).
+
+Only specifying `true` is cascading, meaning the relations of the model will get serialized as well!
 
 ### createModels
 
@@ -178,7 +230,7 @@ It's only mandatory to supply a `key`; `relatedModel` is automatically set. The 
 
 ## <a name="backbone-relationalmodel"/>Backbone.RelationalModel
 
-`Backbone.RelationalModel` introduces a couple of new methods and events.
+`Backbone.RelationalModel` introduces a couple of new methods, events and properties.
 
 ### Methods
 
@@ -186,10 +238,11 @@ It's only mandatory to supply a `key`; `relatedModel` is automatically set. The 
 
 Returns the set of initialized relations on the model.
 
-###### **fetchRelated `relationalModel.fetchRelated(key<string>, [options<object>])`**
+###### **fetchRelated `relationalModel.fetchRelated(key<string>, [options<object>], [update<boolean>])`**
 
 Fetch models from the server that were referenced in the model's attributes, but have not been found/created yet.
-This can be used specifically for lazy-loading scenarios.
+This can be used specifically for lazy-loading scenarios.  Setting `update` to true guarantees that the model
+will be fetched from the server and any model that already exists in the store will be updated with the retrieved data.
 
 By default, a separate request will be fired for each additional model that is to be fetched from the server.
 However, if your server/API supports it, you can fetch the set of models in one request by specifying a `collectionType`
@@ -197,6 +250,27 @@ for the relation you call `fetchRelated` on. The `collectionType` should have an
 method that allows it to construct a url for an array of models.
 See the example at the top of [Backbone.Relation options](#backbone-relation) or
 [Backbone-tastypie](https://github.com/PaulUithol/backbone-tastypie/blob/master/backbone_tastypie/static/js/backbone-tastypie.js#L92) for an example.
+
+### Methods on the type itself
+
+Several methods don't operate on model instances, but are defined on the type itself.
+
+###### **setup `ModelType.setup()`**
+
+Initialize the relations and submodels for the model type. See the [`Q and A`](#q-and-a) for a possible scenario where
+it's useful to call this method manually.
+
+###### **build `ModelType.build(attributes<object>, [options<object>])`**
+
+Create an instance of a model, taking into account what submodels have been defined.
+
+###### **findOrCreate `ModelType.findOrCreate(attributes<string|number|object>, [options<object>])`**
+
+Search for a model instance in the `Backbone.Relational.store`.
+
+* If `attributes` is a string or a number, `findOrCreate` will just query the `store` and return a model if found.
+* If `attributes` is an object, the model will be updated with `attributes` if found.
+  Otherwise, a new model is created with `attributes` (unless `options.create` is explicitly set to `false`).
 
 ### Events
 
@@ -206,6 +280,69 @@ See the example at the top of [Backbone.Relation options](#backbone-relation) or
   Bind to `remove:<key>`; arguments: `(removedModel<Backbone.Model>, related<Backbone.Collection>)`.
 * `update`: triggered on changes to the key itself on `HasMany` and `HasOne` relations.  
   Bind to `update:<key>`; arguments: `(model<Backbone.Model>, related<Backbone.Model|Backbone.Collection>)`.
+
+
+### Properties
+
+Properties can be defined along with the subclass prototype when extending `Backbone.RelationalModel` or a subclass thereof.
+
+###### <a name="property-submodel-types" />**subModelTypes**
+
+Value: an object. Default: `{}`.
+
+A mapping that defines what submodels exist for the model (the `superModel`) on which `subModelTypes` is defined.
+The keys are used to match the [`subModelTypeAttribute`](#property-submodel-type-attribute) when deserializing,
+and the values determine what type of submodel should be created for a key. When building model instances from data,
+we need to determine what kind of object we're dealing with in order to create instances of the right `subModel` type.
+This is done by finding the model for which the key is equal to the value of the
+[`submodelTypeAttribute`](#property-submodel-type-attribute) attribute on the passed in data.
+
+Each `subModel` is considered to be a proper submodel of its superclass (the model type you're extending),
+with a shared id pool. This means that when looking for an object of the supermodel's type, objects
+of a submodel's type can be returned as well, as long as the id matches. In effect, any relations pointing to
+the supermodel will look for instances of it's submodels as well.
+
+Example:
+
+```javascript
+Mammal = Animal.extend({
+	subModelTypes: {
+		'primate': 'Primate',
+		'carnivore': 'Carnivore'
+	}
+});
+var Primate = Mammal.extend();
+var Carnivore = Mammal.extend();
+
+var MammalCollection = AnimalCollection.extend({
+	model: Mammal
+});
+
+// Create a collection that contains a 'Primate' and a 'Carnivore'.
+var mammals = new MammalCollection([
+	{ id: 3, species: 'chimp', type: 'primate' },
+	{ id: 5, species: 'panther', type: 'carnivore' }
+]);
+```
+
+Suppose that we have an `Mammal` model and a `Primate` model extending `Mammal`. If we have a `Primate` object with
+id `3`, this object will be returned when we have a relation pointing to a `Mammal` with id `3`, as `Primate` is
+regarded a specific kind of `Mammal`; it's just a `Mammal` with possibly some primate-specific properties or methods.
+
+Note that this means that there cannot be any overlap in ids between instances of `Mammal` and `Primate`, as the
+`Primate` with id `3` will *be* the `Mammal` with id `3`.
+
+###### <a name="property-submodel-type-attribute" />**subModelTypeAttribute**
+
+Value: a string. Default: `"type"`.
+
+The `subModelTypeAttribute` is a references an attribute on the data used to instantiate `relatedModel`.
+The attribute that will be checked to determine the type of model that
+should be built when a raw object of attributes is set as the related value,
+and if the `relatedModel` has one or more submodels.
+
+See [`subModelTypes`](#property-submodel-types) for more information.
+
 
 ## <a name="example"/>Example
 
@@ -339,16 +476,29 @@ User = Backbone.RelationalModel.extend();
 
 ## <a name="q-and-a"/>Known problems and solutions
 
-> **Q:** Relations do not seem to be initialized properly.
+> **Q:** (Reverse) relations or submodels don't seem to be initialized properly (and I'm using CoffeeScript!)
 
-**A:** This (mostly) seems to occur because a relation is defined in the `reverseRelations` of another model, which hasn't
-been instantiated yet (which in turn means it's `relations` haven't been created yet, so the `reverseRelation` hasn't been created yet either).
-The current workaround is to create an instance of this other model first (this can be either a dummy that gets destroyed right away,
-or one that you actually use).
+**A:** You're probably using the syntax `class MyModel extends Backbone.RelationalModel` instead of `MyModel = Backbone.RelationalModel.extend`.
+This has advantages in CoffeeScript, but it also means that `Backbone.Model.extend` will not get called.
+Instead, CoffeeScript generates piece of code that would normally achieve roughly the same.
+However, `extend` is also the method that Backbone-relational overrides to set up relations and other things as you're defining your `Backbone.RelationalModel` subclass.
 
-> **Q:** After a fetch, `add:<key>` events don't occur for nested relations.
+For exactly this scenario where you're not using `.extend`, `Backbone.RelationalModel` has the `.setup` method, that you can call manually after defining your subclass CoffeeScript-style. For example:
 
-**A:** This is due to the `{silent: true}` in `Backbone.Collection.reset`. Pass `fetch( {add: true} )` to bypass this problem.
+```javascript
+class MyModel extends Backbone.RelationalModel
+	relations: [
+		// etc
+	]
+
+MyModel.setup()
+```
+
+See [issue #91](https://github.com/PaulUithol/Backbone-relational/issues/91) for more information.
+
+> **Q:** After a fetch, I don't get `add:<key>` events for nested relations.
+
+**A:** This is due to `Backbone.Collection.reset` silencing add events. Pass `fetch( {add: true} )` to bypass this problem.
 You may want to override `Backbone.Collection.fetch` for this, and also trigger an event when the fetch has finished while you're at it.
 Example:
 
